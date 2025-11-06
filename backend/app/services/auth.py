@@ -181,11 +181,22 @@ class AuthService:
         Raises:
             HTTPException: If token is invalid or user not found/inactive
         """
+        from app.services.redis_service import RedisService
+
         credentials_exception = HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+        # Check if token is blacklisted
+        is_blacklisted = await RedisService.is_token_blacklisted(token)
+        if is_blacklisted:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token has been revoked. Please login again.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
         # Verify and decode token
         try:
@@ -302,6 +313,86 @@ class AuthService:
         else:
             return 7 * 24 * 60 * 60  # 7 days
 
+    @staticmethod
+    async def get_user_by_api_key(
+        api_key: str,
+        db: AsyncSession
+    ) -> Optional[User]:
+        """
+        Get user by API key.
+
+        Args:
+            api_key: User's API key
+            db: Database session
+
+        Returns:
+            User object if API key is valid, None otherwise
+        """
+        result = await db.execute(
+            select(User).where(User.api_key == api_key)
+        )
+        user = result.scalar_one_or_none()
+
+        if user and user.is_active:
+            return user
+        return None
+
+    @staticmethod
+    async def authenticate_api_key(
+        api_key: str = Depends(lambda: None),  # Will be overridden
+        db: AsyncSession = Depends(get_db)
+    ) -> User:
+        """
+        FastAPI dependency for API key authentication.
+
+        Args:
+            api_key: API key from header
+            db: Database session
+
+        Returns:
+            User object
+
+        Raises:
+            HTTPException: If API key is invalid
+        """
+        from app.services.redis_service import RedisService
+
+        if not api_key:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="API key is required",
+                headers={"WWW-Authenticate": "ApiKey"},
+            )
+
+        # Check rate limit
+        is_allowed, remaining = await RedisService.check_rate_limit(
+            identifier=f"api_key:{api_key}",
+            max_requests=100,
+            window_seconds=60
+        )
+
+        if not is_allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Rate limit exceeded. Try again later.",
+                headers={"X-RateLimit-Remaining": str(remaining)}
+            )
+
+        # Authenticate user by API key
+        user = await AuthService.get_user_by_api_key(api_key, db)
+
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API key",
+                headers={"WWW-Authenticate": "ApiKey"},
+            )
+
+        # Track API usage
+        await RedisService.track_api_usage(api_key, "general")
+
+        return user
+
 
 # Convenience function for getting current user in routes
 async def get_current_user(
@@ -323,3 +414,20 @@ async def get_current_verified_user(
     Can be used directly as a FastAPI dependency.
     """
     return await AuthService.get_current_verified_user(current_user=current_user)
+
+
+# Helper for extracting API key from header
+from fastapi.security import APIKeyHeader
+
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def get_user_from_api_key(
+    api_key: str = Depends(api_key_header),
+    db: AsyncSession = Depends(get_db)
+) -> User:
+    """
+    Convenience function to authenticate user by API key.
+    Can be used directly as a FastAPI dependency.
+    """
+    return await AuthService.authenticate_api_key(api_key=api_key, db=db)

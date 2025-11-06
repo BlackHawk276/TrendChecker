@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.database import close_db, init_db
+from app.services.redis_service import RedisService
 
 
 @asynccontextmanager
@@ -24,6 +25,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     print(f"📊 Environment: {'Development' if settings.debug else 'Production'}")
     print(f"🔧 API Version: {settings.app_version}")
 
+    # Initialize Redis connection
+    try:
+        await RedisService.get_redis()
+        print("✅ Redis connection established")
+    except Exception as e:
+        print(f"⚠️  Redis connection failed: {str(e)}")
+        print("   Some features (token blacklist, rate limiting) may not work")
+
     # Initialize database (only in development)
     if settings.debug:
         print("🗄️  Initializing database tables...")
@@ -34,6 +43,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
 
     # Shutdown
     print("👋 Shutting down E-Commerce Intelligence SaaS API...")
+
+    # Close Redis connection
+    try:
+        await RedisService.close()
+        print("✅ Redis connection closed")
+    except Exception as e:
+        print(f"⚠️  Error closing Redis: {str(e)}")
+
+    # Close database connections
     await close_db()
     print("✅ Database connections closed")
 

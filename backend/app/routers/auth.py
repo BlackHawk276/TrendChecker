@@ -16,7 +16,9 @@ from app.schemas import (
     AuthResponse,
     ChangePasswordRequest,
     ErrorResponse,
+    ForgotPasswordRequest,
     MessageResponse,
+    ResetPasswordRequest,
     TokenRefreshRequest,
     TokenResponse,
     UserLoginRequest,
@@ -25,6 +27,8 @@ from app.schemas import (
     VerifyEmailRequest,
 )
 from app.services.auth import AuthService, get_current_user
+from app.services.email_service import EmailService
+from app.services.redis_service import RedisService
 
 router = APIRouter()
 
@@ -112,10 +116,24 @@ async def register(
 
     refresh_token = AuthService.create_refresh_token(user_id=new_user.id)
 
-    # TODO: Send verification email with token
-    # verification_token = AuthService.create_verification_token()
-    # Store verification_token in database or cache
-    # Send email with verification link
+    # Generate and store verification token
+    verification_token = AuthService.create_verification_token()
+    await RedisService.store_verification_token(
+        user_id=str(new_user.id),
+        token=verification_token,
+        expires_in=86400  # 24 hours
+    )
+
+    # Send verification email (async, non-blocking)
+    try:
+        await EmailService.send_verification_email(
+            to_email=new_user.email,
+            full_name=new_user.full_name or new_user.email,
+            verification_token=verification_token
+        )
+    except Exception as e:
+        # Log error but don't fail registration
+        print(f"Failed to send verification email: {str(e)}")
 
     return AuthResponse(
         user=UserResponse.model_validate(new_user),
@@ -289,21 +307,24 @@ async def get_current_user_info(
     }
 )
 async def logout(
+    token: str = Depends(oauth2_scheme),
     current_user: User = Depends(get_current_user)
 ) -> MessageResponse:
     """
-    Logout current user.
+    Logout current user and blacklist the token.
 
-    Note: With JWT tokens, the token remains valid until expiration.
-    For complete logout, implement token blacklisting with Redis.
-
-    Client should discard the token after logout.
+    The token will be added to Redis blacklist and will no longer be valid.
     """
-    # TODO: If using Redis, add token to blacklist
-    # redis_client.setex(f"blacklist:{token}", expiration, "1")
+    from app.services.auth import oauth2_scheme
+
+    # Calculate token expiration
+    expiration = AuthService.get_token_expiration_seconds("access")
+
+    # Blacklist the token
+    await RedisService.blacklist_token(token, expiration)
 
     return MessageResponse(
-        message="Successfully logged out. Please discard your tokens."
+        message="Successfully logged out. Your token has been invalidated."
     )
 
 
@@ -322,39 +343,58 @@ async def verify_email(
     """
     Verify user's email address using verification token.
 
-    The verification token should be sent to the user's email during registration.
+    The verification token is sent to the user's email during registration.
     """
-    # TODO: Implement token storage and validation
-    # This is a placeholder implementation
-
-    # In production, you would:
-    # 1. Store verification tokens in database or Redis with user_id and expiration
-    # 2. Look up the token
-    # 3. Verify it hasn't expired
-    # 4. Mark user as verified
-
-    # For now, we'll accept any token and mark the current user as verified
-    # You should implement proper token storage and validation
-
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Email verification not fully implemented. Requires token storage system."
+    # Get user_id from verification token
+    user_id_str = await RedisService.get_verification_token(
+        verification_data.verification_token
     )
 
-    # Example implementation:
-    # token_data = await get_verification_token_from_redis(verification_data.verification_token)
-    # if not token_data:
-    #     raise HTTPException(status_code=404, detail="Token not found or expired")
-    #
-    # result = await db.execute(select(User).where(User.id == token_data.user_id))
-    # user = result.scalar_one_or_none()
-    # if not user:
-    #     raise HTTPException(status_code=404, detail="User not found")
-    #
-    # user.is_verified = True
-    # await db.commit()
-    #
-    # return MessageResponse(message="Email verified successfully")
+    if not user_id_str:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Verification token not found or expired"
+        )
+
+    # Get user from database
+    try:
+        result = await db.execute(
+            select(User).where(User.id == uuid.UUID(user_id_str))
+        )
+        user = result.scalar_one_or_none()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error: {str(e)}"
+        )
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    # Check if already verified
+    if user.is_verified:
+        return MessageResponse(message="Email already verified")
+
+    # Mark user as verified
+    user.is_verified = True
+    user.updated_at = datetime.utcnow()
+
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to verify email: {str(e)}"
+        )
+
+    # Delete the verification token
+    await RedisService.delete_verification_token(verification_data.verification_token)
+
+    return MessageResponse(message="Email verified successfully")
 
 
 @router.post(
@@ -403,6 +443,15 @@ async def change_password(
             detail=f"Failed to update password: {str(e)}"
         )
 
+    # Send confirmation email
+    try:
+        await EmailService.send_password_changed_email(
+            to_email=current_user.email,
+            full_name=current_user.full_name or current_user.email
+        )
+    except Exception as e:
+        print(f"Failed to send password changed email: {str(e)}")
+
     return MessageResponse(
         message="Password changed successfully. Please login with your new password."
     )
@@ -437,4 +486,133 @@ async def regenerate_api_key(
 
     return MessageResponse(
         message=f"API key regenerated successfully. New key: {new_api_key}"
+    )
+
+
+@router.post(
+    "/forgot-password",
+    response_model=MessageResponse,
+    responses={
+        404: {"model": ErrorResponse, "description": "Email not found"},
+    }
+)
+async def forgot_password(
+    request_data: ForgotPasswordRequest,
+    db: AsyncSession = Depends(get_db)
+) -> MessageResponse:
+    """
+    Request password reset for a user.
+
+    Sends a password reset email with a token to the user's email address.
+    The token expires in 1 hour.
+    """
+    # Find user by email
+    result = await db.execute(
+        select(User).where(User.email == request_data.email)
+    )
+    user = result.scalar_one_or_none()
+
+    # Always return success to prevent email enumeration
+    # But only send email if user exists
+    if user:
+        # Generate reset token
+        reset_token = AuthService.create_verification_token()
+
+        # Store reset token in Redis
+        await RedisService.store_reset_token(
+            user_id=str(user.id),
+            token=reset_token,
+            expires_in=3600  # 1 hour
+        )
+
+        # Send password reset email
+        try:
+            await EmailService.send_password_reset_email(
+                to_email=user.email,
+                full_name=user.full_name or user.email,
+                reset_token=reset_token
+            )
+        except Exception as e:
+            print(f"Failed to send password reset email: {str(e)}")
+
+    return MessageResponse(
+        message="If your email is registered, you will receive a password reset link shortly."
+    )
+
+
+@router.post(
+    "/reset-password",
+    response_model=MessageResponse,
+    responses={
+        400: {"model": ErrorResponse, "description": "Invalid or expired reset token"},
+        404: {"model": ErrorResponse, "description": "Token not found"},
+    }
+)
+async def reset_password(
+    reset_data: ResetPasswordRequest,
+    db: AsyncSession = Depends(get_db)
+) -> MessageResponse:
+    """
+    Reset user's password using reset token.
+
+    The reset token is sent to the user's email via the forgot-password endpoint.
+    Tokens expire after 1 hour.
+    """
+    # Get user_id from reset token
+    user_id_str = await RedisService.get_reset_token(reset_data.reset_token)
+
+    if not user_id_str:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Reset token not found or expired"
+        )
+
+    # Get user from database
+    try:
+        result = await db.execute(
+            select(User).where(User.id == uuid.UUID(user_id_str))
+        )
+        user = result.scalar_one_or_none()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error: {str(e)}"
+        )
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    # Hash new password
+    new_hashed_password = AuthService.hash_password(reset_data.new_password)
+
+    # Update password
+    user.hashed_password = new_hashed_password
+    user.updated_at = datetime.utcnow()
+
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to reset password: {str(e)}"
+        )
+
+    # Delete the reset token
+    await RedisService.delete_reset_token(reset_data.reset_token)
+
+    # Send confirmation email
+    try:
+        await EmailService.send_password_changed_email(
+            to_email=user.email,
+            full_name=user.full_name or user.email
+        )
+    except Exception as e:
+        print(f"Failed to send password changed email: {str(e)}")
+
+    return MessageResponse(
+        message="Password reset successfully. You can now login with your new password."
     )
