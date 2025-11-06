@@ -112,7 +112,7 @@ async def root():
 
 
 # Include routers
-from app.routers import auth
+from app.routers import auth, stores
 
 app.include_router(
     auth.router,
@@ -120,10 +120,15 @@ app.include_router(
     tags=["Authentication"]
 )
 
+app.include_router(
+    stores.router,
+    prefix=f"{settings.api_v1_prefix}/stores",
+    tags=["Stores"]
+)
+
 # Additional routers to be added later
-# from app.routers import stores, products, users
+# from app.routers import products, users
 # app.include_router(users.router, prefix=f"{settings.api_v1_prefix}/users", tags=["Users"])
-# app.include_router(stores.router, prefix=f"{settings.api_v1_prefix}/stores", tags=["Stores"])
 # app.include_router(products.router, prefix=f"{settings.api_v1_prefix}/products", tags=["Products"])
 
 
