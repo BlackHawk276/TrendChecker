@@ -331,3 +331,146 @@ class SearchFilters(BaseModel):
         if v not in ["asc", "desc"]:
             raise ValueError("sort_order must be 'asc' or 'desc'")
         return v
+
+
+# User-specific schemas
+class UserProfileUpdate(BaseModel):
+    """Schema for updating user profile."""
+    full_name: Optional[str] = Field(None, min_length=1, max_length=255)
+    avatar_url: Optional[str] = Field(None, max_length=500)
+
+
+class UserProfileResponse(BaseModel):
+    """Schema for detailed user profile."""
+    id: UUID
+    email: str
+    full_name: Optional[str]
+    avatar_url: Optional[str]
+    subscription_tier: str
+    subscription_status: str
+    trial_ends_at: Optional[datetime]
+    subscription_ends_at: Optional[datetime]
+    searches_used_this_month: int
+    searches_limit: int
+    searches_remaining: int
+    is_active: bool
+    is_verified: bool
+    created_at: datetime
+    last_login_at: Optional[datetime]
+    api_key: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class SavedStoreCreate(BaseModel):
+    """Schema for saving a store."""
+    store_id: UUID
+    notes: Optional[str] = Field(None, max_length=1000)
+
+
+class SavedStoreUpdate(BaseModel):
+    """Schema for updating saved store notes."""
+    notes: Optional[str] = Field(None, max_length=1000)
+
+
+class SavedStoreResponse(BaseModel):
+    """Schema for saved store response."""
+    store: StoreResponse
+    saved_at: datetime
+    notes: Optional[str]
+
+    class Config:
+        from_attributes = True
+
+
+class SavedStoreListResponse(BaseModel):
+    """Paginated saved stores response."""
+    data: list[SavedStoreResponse]
+    pagination: PaginationMeta
+
+
+class AlertCriteria(BaseModel):
+    """Alert criteria configuration."""
+    category: Optional[str] = None
+    min_products: Optional[int] = None
+    min_trending_score: Optional[float] = None
+    keywords: Optional[list[str]] = None
+
+
+class AlertCreate(BaseModel):
+    """Schema for creating an alert."""
+    alert_type: str = Field(..., pattern="^(new_store|price_drop|trending)$")
+    criteria: Optional[AlertCriteria] = None
+    store_id: Optional[UUID] = None
+
+    @field_validator("alert_type")
+    @classmethod
+    def validate_alert_type(cls, v: str) -> str:
+        """Validate alert type."""
+        allowed = ["new_store", "price_drop", "trending"]
+        if v not in allowed:
+            raise ValueError(f"alert_type must be one of: {', '.join(allowed)}")
+        return v
+
+
+class AlertResponse(BaseModel):
+    """Schema for alert response."""
+    id: UUID
+    user_id: UUID
+    alert_type: str
+    criteria: Optional[dict]
+    store_id: Optional[UUID]
+    is_active: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AlertListResponse(BaseModel):
+    """List of alerts."""
+    data: list[AlertResponse]
+    total: int
+
+
+class UsageHistoryItem(BaseModel):
+    """Usage history for a month."""
+    month: str  # YYYY-MM format
+    searches_used: int
+    searches_limit: int
+
+
+class CategoryUsageItem(BaseModel):
+    """Category usage statistics."""
+    category: str
+    search_count: int
+    percentage: float
+
+
+class UsageStatsResponse(BaseModel):
+    """Detailed usage statistics."""
+    searches_used_this_month: int
+    searches_remaining: int
+    searches_limit: int
+    reset_date: datetime
+    usage_percentage: float
+    history: list[UsageHistoryItem]
+    category_breakdown: list[CategoryUsageItem]
+
+
+class ActivityItem(BaseModel):
+    """Recent activity item."""
+    activity_type: str  # "search", "view", "save", "analyze"
+    description: str
+    store_domain: Optional[str] = None
+    timestamp: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ActivityListResponse(BaseModel):
+    """Recent activity response."""
+    data: list[ActivityItem]
+    total: int
