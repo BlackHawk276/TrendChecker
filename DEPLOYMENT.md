@@ -1,4 +1,6 @@
-# Deployment Guide
+# Deployment Guide - Monorepo
+
+> This guide covers deploying the TrendChecker monorepo with apps/web (Next.js) and apps/api (FastAPI)
 
 ## Vercel Deployment (Frontend)
 
@@ -8,9 +10,9 @@
    - Go to https://vercel.com/new
    - Import your GitHub repository
 
-2. **Configure Project Settings**
+2. **Configure Project Settings** ⚠️ **CRITICAL STEP**
    - **Framework Preset**: Next.js
-   - **Root Directory**: `frontend` (IMPORTANT!)
+   - **Root Directory**: `apps/web` ← **MUST BE SET TO THIS!**
    - **Build Command**: `npm run build` (default)
    - **Output Directory**: `.next` (default)
    - **Install Command**: `npm install` (default)
@@ -34,8 +36,8 @@
 # Install Vercel CLI
 npm install -g vercel
 
-# Navigate to frontend directory
-cd frontend
+# Navigate to web app directory
+cd apps/web
 
 # Deploy
 vercel
@@ -55,8 +57,8 @@ vercel --prod
 ### Troubleshooting
 
 **404 NOT_FOUND Error:**
-- Make sure "Root Directory" is set to `frontend` in Vercel project settings
-- Go to: Project Settings → General → Root Directory → `frontend`
+- Make sure "Root Directory" is set to `apps/web` in Vercel project settings
+- Go to: Project Settings → General → Root Directory → `apps/web`
 - Redeploy after changing this setting
 
 **Build Failures:**
@@ -81,7 +83,7 @@ vercel --prod
    - Select your repository
 
 2. **Configure Service**
-   - **Root Directory**: `backend`
+   - **Root Directory**: `apps/api`
    - **Build Command**: Leave empty (uses Dockerfile or Procfile)
    - **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
 
@@ -118,7 +120,7 @@ vercel --prod
 
 2. **Configure**
    - **Name**: trendchecker-api
-   - **Root Directory**: `backend`
+   - **Root Directory**: `apps/api`
    - **Environment**: Python 3
    - **Build Command**: `pip install -r requirements.txt`
    - **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
@@ -138,7 +140,7 @@ vercel --prod
 
 ## Environment Variables Reference
 
-### Frontend (.env.local)
+### Frontend (apps/web/.env.local)
 ```bash
 NEXT_PUBLIC_API_URL=http://localhost:8000              # Local development
 NEXT_PUBLIC_API_URL=https://api.yourdomain.com         # Production
@@ -148,7 +150,7 @@ NEXT_PUBLIC_APP_URL=http://localhost:3000              # Local
 NEXT_PUBLIC_APP_URL=https://yourdomain.com             # Production
 ```
 
-### Backend (.env)
+### Backend (apps/api/.env)
 ```bash
 # Database
 DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/dbname
